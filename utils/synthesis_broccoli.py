@@ -58,7 +58,7 @@ def synthesis(pauli_layers, pauli_map=None, graph=None, qc=None, arch='manhattan
     pauli_map, graph, qc = synthesis_initial(pauli_layers, pauli_map, graph, qc, arch)
     scheduler = Scheduler(pauli_map, graph, qc)
     n_qubits = len(pauli_layers[0][0][0].ps)
-    rdy_for_bridge = [0 for i in range(n_qubits)]
+    rdy_for_bridge = [0 for i in range(n_qubits)] # not used here
     block_cnt = 0
     
     l_single_gates_cnt = 0
@@ -127,37 +127,20 @@ def synthesis(pauli_layers, pauli_map=None, graph=None, qc=None, arch='manhattan
                 elif l == 2:
                     stalk.append(i)
             
-            # do MST algorithm 3 times:
-            # 1st time: connect flower_head
-            # 2nd time: connect stalk
-            # 3rd time: connect flower_head and stalk by only one edge
-            
             centor = scheduler.find_centor(stalk)
             
             if stalk == []:
                 stalk = flower_head[-1:]
                 flower_head = flower_head[:-1]
                 centor = stalk[0]
+            
+            # add swap gates on hardware to make all stalk qubits a connected component
             root_tree_nodes, edges1 = scheduler.gather_root_tree(stalk, centor)
+            
+            # add swap gates on hardware to make all flower_head qubits connected to stalk qubits
             edges2 = scheduler.gather_leaf_tree(flower_head, root_tree_nodes, len(block), use_bridge)
-            # scheduler.MST_init(n_qubits)
-            
-            # mst_edges1 = scheduler.MST(flower_head, edges=[(flower_head[i], flower_head[j])\
-            #                                     for i in range(len(flower_head))\
-            #                                         for j in range(i + 1, len(flower_head))])
-            # mst_edges2 = scheduler.MST(stalk, edges=[(stalk[i], stalk[j])\
-            #                                     for i in range(len(stalk))\
-            #                                         for j in range(i + 1, len(stalk))])
-            # mst_edges3 = scheduler.MST(flower_head + stalk, edges=[(f, s) for f in flower_head for s in stalk])
-            
-            # decide root:
-            # pick a non-I node in stalk
             find_root = True
-            # scheduler.Tree_init(mst_edges1 + mst_edges2 + mst_edges3, root)
-            
-            # print(f'({len(flower_head)}, {len(stalk)})')
-            # print(block)
-            # execution of each pauli string
+
             for pauli_string in block:
                 if find_root == True:
                     root = stalk[0]
@@ -165,11 +148,12 @@ def synthesis(pauli_layers, pauli_map=None, graph=None, qc=None, arch='manhattan
                         if pauli_string.ps[i] != 'I':
                             root = i
                             break
+                    # Find a tree structure after all data qubits are connected. flood fill from root.
                     scheduler.Tree_init(edges1 + edges2, root)
                 
                 # the left side of a pauli string circuit
                 scheduler.enable_cancel = True
-                for i in flower_head + stalk:
+                for i in flower_head + stalk: # iterate through all data qubits and add single-qubit gate
                     pauli = pauli_string.ps[i]
                     l_cx_cnt = l_cx_cnt + 1
                     if pauli == 'I':
@@ -186,30 +170,36 @@ def synthesis(pauli_layers, pauli_map=None, graph=None, qc=None, arch='manhattan
                         raise Exception('Illegal pauli operator: ' + pauli)
                 l_cx_cnt = l_cx_cnt - 1
                 
-                scheduler.tree.refresh()
+                scheduler.tree.refresh() # not used
                 
                 save_instructions = []
+                # scheduler.tree.node_list is the sequence of data qubits visited in flood_fill, from leaf to root
                 for i in range(len(scheduler.tree.node_list)):
                     node = scheduler.tree.node_list[i]
+                    # node.idx_after_swap is the logical qubit number of this node
+                    # node.parent_after_swap is the logical qubit number of its parent in the tree structure
                     if node.idx_after_swap < n_qubits and pauli_string.ps[node.idx_after_swap] == 'I':
                         continue
-                    if node.parent_after_swap != -1:
+                    if node.parent_after_swap != -1: # node.parent_after_swap == -1 means it's a root
                         if node.parent_after_swap >= n_qubits or pauli_string.ps[node.parent_after_swap] != 'I':
                             # node.parent_after_swap >= n_qubits means it's a bridge
                             # node.parent_after_swap is not an 'I' means we just CX to it.
                             scheduler.add_instruction('Logical_CNOT', (node.idx_after_swap, node.parent_after_swap))
                             save_instructions.append(('Logical_CNOT', (node.idx_after_swap, node.parent_after_swap)))
-                        else:
+                        else: # not used
                             # otherwise, the parent is an 'I' that we need to swap to go through.
                             scheduler.add_instruction('Logical_SWAP', (node.idx_after_swap, node.parent_after_swap))
                             save_instructions.append(('Logical_SWAP', (node.idx_after_swap, node.parent_after_swap)))
                             scheduler.tree.swap_two_nodes(node.parent_after_swap, node.idx_after_swap)
-                    else:
+                    else: # node is a root
                         scheduler.add_instruction('Logical_RZ', node.idx_after_swap)
                 
+                # add remaining logical instructions to qc(a QuantumCircuit object)
                 scheduler.clear_uncompiled_logical_instructions()
                 # the right side of a pauli string circuit
                 scheduler.enable_cancel = True
+                
+                # right half part
                 for ir in reversed(save_instructions):
                     scheduler.add_instruction(ir[0], ir[1])
                 
